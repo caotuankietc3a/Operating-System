@@ -2,6 +2,7 @@
 #include "stdlib.h"
 #include "string.h"
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 static BYTE _ram[RAM_SIZE];
@@ -78,8 +79,7 @@ static int translate(addr_t virtual_addr,   // Given virtual address
     return 0;
   }
 
-  int i;
-  for (i = 0; i < page_table->size; i++) {
+  for (int i = 0; i < page_table->size; i++) {
     if (page_table->table[i].v_index == second_lv) {
       /* TODO: Concatenate the offset of the virtual addess
        * to [p_index] field of page_table->table[i] to
@@ -114,6 +114,17 @@ addr_t alloc_mem(uint32_t size, struct pcb_t *proc) {
    * to know whether this page has been used by a process.
    * For virtual memory space, check bp (break pointer).
    * */
+  uint32_t current_num_pages = 0;
+  for (int i = 0; i < NUM_PAGES; i++) {
+    if (_mem_stat[i].proc == 0) {
+      current_num_pages++;
+    }
+  }
+
+  if (current_num_pages >= num_pages &&
+      proc->bp + num_pages * PAGE_SIZE < NUM_PAGES * (PAGE_SIZE + 1)) {
+    mem_avail = 1;
+  }
 
   if (mem_avail) {
     /* We could allocate new memory region to the process */
@@ -125,6 +136,55 @@ addr_t alloc_mem(uint32_t size, struct pcb_t *proc) {
      * 	- Add entries to segment table page tables of [proc]
      * 	  to ensure accesses to allocated memory slot is
      * 	  valid. */
+    uint32_t num_pages_use = 0;
+    for (int i = 0, pre_index = 0, linked_list_index = 0; i < NUM_PAGES; i++) {
+      if (_mem_stat[i].proc == 0) {
+        _mem_stat[i].proc = proc->pid;
+        _mem_stat[i].index = linked_list_index;
+        if (linked_list_index != 0) {
+          _mem_stat[pre_index].next = i;
+        }
+
+        addr_t physical_addr = i;
+        addr_t first_lv = get_first_lv(ret_mem + linked_list_index * PAGE_SIZE);
+        addr_t second_lv =
+            get_second_lv(ret_mem + linked_list_index * PAGE_SIZE);
+
+        bool check_first_level = false;
+        for (int n = 0; n < proc->seg_table->size; n++) {
+          if (proc->seg_table->table[n].v_index == first_lv) {
+            int page_size = proc->seg_table->table[n].pages->size;
+            proc->seg_table->table[n].pages->table[page_size].v_index =
+                second_lv;
+            proc->seg_table->table[n].pages->table[page_size].p_index =
+                physical_addr;
+            proc->seg_table->table[n].pages->size++;
+            check_first_level = true;
+            break;
+          }
+        }
+
+        if (!check_first_level) {
+          int seg_table_size = proc->seg_table->size;
+          proc->seg_table->table[seg_table_size].pages =
+              (struct page_table_t *)malloc(sizeof(struct page_table_t));
+          proc->seg_table->size++;
+          proc->seg_table->table[seg_table_size].pages->size++;
+          proc->seg_table->table[seg_table_size].v_index = first_lv;
+          proc->seg_table->table[seg_table_size].pages->table[0].v_index =
+              second_lv;
+          proc->seg_table->table[seg_table_size].pages->table[0].p_index =
+              physical_addr;
+        }
+        linked_list_index++;
+        pre_index = i;
+        num_pages_use++;
+        if (num_pages_use == num_pages) {
+          _mem_stat[pre_index].next = -1;
+          break;
+        }
+      }
+    }
   }
   pthread_mutex_unlock(&mem_lock);
   return ret_mem;
@@ -139,6 +199,77 @@ int free_mem(addr_t address, struct pcb_t *proc) {
    * 	  the process [proc].
    * 	- Remember to use lock to protect the memory from other
    * 	  processes.  */
+  pthread_mutex_lock(&mem_lock);
+  addr_t physical_addr;
+  if (translate(address, &physical_addr, proc)) {
+    int i = 0, linked_list_index = 0;
+    for (; i < NUM_PAGES; i++) {
+      if (physical_addr == i << OFFSET_LEN) {
+        break;
+      }
+    }
+    int current_index = i;
+    while (current_index != -1) {
+      _mem_stat[current_index].proc = 0;
+      current_index = _mem_stat[current_index].next;
+      addr_t first_lv = get_first_lv(address + linked_list_index * PAGE_SIZE);
+      addr_t second_lv = get_second_lv(address + linked_list_index * PAGE_SIZE);
+      for (int n = 0; n < proc->seg_table->size; n++) {
+        if (proc->seg_table->table[n].v_index == first_lv) {
+          // Find and remove exactly the element in linked_list_index.
+          for (int m = 0; m < proc->seg_table->table[n].pages->size; m++) {
+            if (proc->seg_table->table[n].pages->table[m].v_index ==
+                second_lv) {
+
+              // Shift all element of page_table at cr_index to the left.
+              int cr_index = m;
+              for (; cr_index < proc->seg_table->table[n].pages->size - 1;
+                   cr_index++) {
+                proc->seg_table->table[n].pages->table[cr_index].v_index =
+                    proc->seg_table->table[n]
+                        .pages->table[cr_index + 1]
+                        .v_index;
+                proc->seg_table->table[n].pages->table[cr_index].p_index =
+                    proc->seg_table->table[n]
+                        .pages->table[cr_index + 1]
+                        .p_index;
+              }
+
+              // The last one in v_index and p_index of page_table must be
+              // assigned to 0 after shift left.
+              proc->seg_table->table[n].pages->table[cr_index].v_index = 0;
+              proc->seg_table->table[n].pages->table[cr_index].p_index = 0;
+              proc->seg_table->table[n].pages->size--;
+            }
+            break;
+          }
+
+          // If page_table is empty, then remove it.
+          if (proc->seg_table->table[n].pages->size == 0) {
+            free(proc->seg_table->table[n].pages);
+
+            // Shift all element of seg_table at cr_index to the left.
+            int cr_index = n;
+            for (; cr_index < proc->seg_table->size - 1; cr_index++) {
+              proc->seg_table->table[cr_index].v_index =
+                  proc->seg_table->table[cr_index + 1].v_index;
+              proc->seg_table->table[cr_index].pages =
+                  proc->seg_table->table[cr_index + 1].pages;
+            }
+            // The last one in v_index and pages of seg_table must be
+            // assigned to 0 after shift left.
+            proc->seg_table->table[cr_index].v_index = 0;
+            proc->seg_table->table[cr_index].pages = NULL;
+            proc->seg_table->size--;
+          }
+          break;
+        }
+      }
+      linked_list_index++;
+    }
+  }
+
+  pthread_mutex_unlock(&mem_lock);
   return 0;
 }
 
