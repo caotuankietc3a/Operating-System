@@ -1,0 +1,7 @@
+Name: Cao Tuan Kiet
+Class: CC02
+Student Id: 2053166
+School: Ho Chi Minh City University of Technology
+Year: 2nd
+Subject: OS
+

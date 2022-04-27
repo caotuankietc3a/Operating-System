@@ -1,0 +1,24 @@
+enroll(student){
+  lock(t)
+  if (number_of_student < class_size){
+    addToClass(student)
+    Increase number_of_student by 1
+  }
+  else{
+    Notify: Can not register to this class
+  }
+  unclock(t);
+}
+
+disenroll(student){
+  lock(t)
+  if student is in class {
+    removeFromClass(student)
+    Decrease number_of_student by 1
+
+  }
+  else{
+    Notify: Student not found
+  }
+  unclock(t)
+}

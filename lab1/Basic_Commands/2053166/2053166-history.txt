@@ -1,0 +1,12 @@
+All Commands:
+   mkdir
+   touch
+   nvim: 
+      :w
+      :q
+      :i[enter]
+      :wq
+   ls
+   cat
+   head -5
+   tail -5
